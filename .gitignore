@@ -3,3 +3,5 @@ node_modules/
 *.json
 service-account.json .docs
 google-service-account.json
+*.backup *.old
+test-*.js test-*.sh docs
