@@ -1,0 +1,537 @@
+// MCP Server for Salon Booking System - Claude Integration
+// This server provides tools for the booking agent to interact with Google Calendar and Airtable
+
+const { MCPServer } = require('@anthropic-ai/mcp');
+const { google } = require('googleapis');
+const Airtable = require('airtable');
+
+class SalonBookingMCP extends MCPServer {
+  constructor() {
+    super({
+      name: 'salon-booking-mcp',
+      version: '1.0.0',
+      description: 'MCP server for salon appointment booking with Claude'
+    });
+
+    // Initialize Google Calendar
+    this.calendar = google.calendar({ version: 'v3', auth: this.getGoogleAuth() });
+    
+    // Initialize Airtable
+    this.airtable = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY });
+    this.base = this.airtable.base(process.env.AIRTABLE_BASE_ID);
+
+    this.registerTools();
+  }
+
+  getGoogleAuth() {
+    const auth = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
+    );
+    
+    auth.setCredentials({
+      refresh_token: process.env.GOOGLE_REFRESH_TOKEN
+    });
+    
+    return auth;
+  }
+
+  registerTools() {
+    // Tool 1: Check Calendar Availability
+    this.addTool({
+      name: 'check_calendar',
+      description: 'Check available time slots in the salon calendar for a specific date and service',
+      parameters: {
+        type: 'object',
+        properties: {
+          date: {
+            type: 'string',
+            description: 'The date to check availability (YYYY-MM-DD format)'
+          },
+          service: {
+            type: 'string',
+            description: 'The service name to book'
+          },
+          duration: {
+            type: 'number',
+            description: 'Duration in minutes (optional, will be looked up if not provided)'
+          }
+        },
+        required: ['date', 'service']
+      },
+      handler: async (params) => {
+        return await this.checkCalendarAvailability(params);
+      }
+    });
+
+    // Tool 2: Create Booking
+    this.addTool({
+      name: 'create_booking',
+      description: 'Create a new appointment booking in both Airtable and Google Calendar',
+      parameters: {
+        type: 'object',
+        properties: {
+          customerName: {
+            type: 'string',
+            description: 'Customer name'
+          },
+          customerPhone: {
+            type: 'string',
+            description: 'Customer phone number'
+          },
+          service: {
+            type: 'string',
+            description: 'Service name'
+          },
+          dateTime: {
+            type: 'string',
+            description: 'Appointment date and time (ISO 8601 format)'
+          },
+          friendBooking: {
+            type: 'boolean',
+            description: 'Is this booking for a friend?'
+          },
+          friendName: {
+            type: 'string',
+            description: 'Friend name if booking for someone else'
+          },
+          friendPhone: {
+            type: 'string',
+            description: 'Friend phone if booking for someone else'
+          }
+        },
+        required: ['customerName', 'customerPhone', 'service', 'dateTime']
+      },
+      handler: async (params) => {
+        return await this.createBooking(params);
+      }
+    });
+
+    // Tool 3: Get Customer Bookings
+    this.addTool({
+      name: 'get_customer_bookings',
+      description: 'Retrieve all bookings for a specific customer',
+      parameters: {
+        type: 'object',
+        properties: {
+          phoneNumber: {
+            type: 'string',
+            description: 'Customer phone number'
+          },
+          upcomingOnly: {
+            type: 'boolean',
+            description: 'Only return upcoming bookings'
+          }
+        },
+        required: ['phoneNumber']
+      },
+      handler: async (params) => {
+        return await this.getCustomerBookings(params);
+      }
+    });
+
+    // Tool 4: Cancel Booking
+    this.addTool({
+      name: 'cancel_booking',
+      description: 'Cancel an existing appointment',
+      parameters: {
+        type: 'object',
+        properties: {
+          bookingId: {
+            type: 'string',
+            description: 'The booking ID to cancel'
+          },
+          reason: {
+            type: 'string',
+            description: 'Cancellation reason (optional)'
+          }
+        },
+        required: ['bookingId']
+      },
+      handler: async (params) => {
+        return await this.cancelBooking(params);
+      }
+    });
+
+    // Tool 5: Match Service Name
+    this.addTool({
+      name: 'match_service',
+      description: 'Match a natural language service request to an actual service in the database',
+      parameters: {
+        type: 'object',
+        properties: {
+          userRequest: {
+            type: 'string',
+            description: 'The user\'s service request in natural language'
+          }
+        },
+        required: ['userRequest']
+      },
+      handler: async (params) => {
+        return await this.matchService(params);
+      }
+    });
+  }
+
+  async checkCalendarAvailability({ date, service, duration }) {
+    try {
+      // Get service details from Airtable if duration not provided
+      if (!duration) {
+        const serviceRecord = await this.base('Services')
+          .select({
+            filterByFormula: `{name} = '${service}'`,
+            maxRecords: 1
+          })
+          .firstPage();
+        
+        if (serviceRecord.length === 0) {
+          return { error: 'Service not found' };
+        }
+        
+        duration = serviceRecord[0].get('duration');
+      }
+
+      // Get business hours from settings
+      const settings = await this.base('BusinessSettings').select({ maxRecords: 1 }).firstPage();
+      const businessHours = settings[0].get('business_hours_json');
+
+      // Parse business hours for the requested date
+      const dayOfWeek = new Date(date).toLocaleDateString('en-US', { weekday: 'long' });
+      const hoursForDay = businessHours[dayOfWeek];
+
+      if (!hoursForDay || hoursForDay.closed) {
+        return { available: false, reason: 'Business closed on this day' };
+      }
+
+      // Get existing events from Google Calendar
+      const events = await this.calendar.events.list({
+        calendarId: process.env.GOOGLE_CALENDAR_ID,
+        timeMin: new Date(`${date}T${hoursForDay.open}:00`).toISOString(),
+        timeMax: new Date(`${date}T${hoursForDay.close}:00`).toISOString(),
+        singleEvents: true,
+        orderBy: 'startTime'
+      });
+
+      // Calculate available slots
+      const availableSlots = this.calculateAvailableSlots(
+        hoursForDay.open,
+        hoursForDay.close,
+        duration,
+        events.data.items
+      );
+
+      return {
+        available: availableSlots.length > 0,
+        slots: availableSlots,
+        date,
+        service,
+        duration
+      };
+    } catch (error) {
+      console.error('Error checking calendar:', error);
+      return { error: error.message };
+    }
+  }
+
+  calculateAvailableSlots(openTime, closeTime, duration, existingEvents) {
+    const slots = [];
+    const slotInterval = 30; // 30-minute intervals
+    
+    let currentTime = this.parseTime(openTime);
+    const endTime = this.parseTime(closeTime);
+
+    while (currentTime + duration <= endTime) {
+      const slotEnd = currentTime + duration;
+      
+      // Check if this slot conflicts with existing events
+      const hasConflict = existingEvents.some(event => {
+        const eventStart = new Date(event.start.dateTime).getHours() * 60 + 
+                          new Date(event.start.dateTime).getMinutes();
+        const eventEnd = new Date(event.end.dateTime).getHours() * 60 + 
+                        new Date(event.end.dateTime).getMinutes();
+        
+        return (currentTime < eventEnd && slotEnd > eventStart);
+      });
+
+      if (!hasConflict) {
+        slots.push(this.formatTime(currentTime));
+      }
+
+      currentTime += slotInterval;
+    }
+
+    return slots;
+  }
+
+  parseTime(timeString) {
+    const [hours, minutes] = timeString.split(':').map(Number);
+    return hours * 60 + minutes;
+  }
+
+  formatTime(minutes) {
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    const displayHours = hours > 12 ? hours - 12 : hours;
+    return `${displayHours}:${mins.toString().padStart(2, '0')} ${ampm}`;
+  }
+
+  async createBooking(params) {
+    try {
+      const {
+        customerName,
+        customerPhone,
+        service,
+        dateTime,
+        friendBooking = false,
+        friendName,
+        friendPhone
+      } = params;
+
+      // Get or create customer
+      let customer = await this.getOrCreateCustomer(customerPhone, customerName);
+
+      // Check booking limit
+      const bookingCount = customer.get('total_bookings') || 0;
+      const bookingLimit = await this.getBookingLimit();
+
+      if (bookingCount >= bookingLimit) {
+        return {
+          success: false,
+          error: `Booking limit reached (${bookingLimit} appointments per customer)`
+        };
+      }
+
+      // Get service details
+      const serviceRecord = await this.base('Services')
+        .select({
+          filterByFormula: `{name} = '${service}'`,
+          maxRecords: 1
+        })
+        .firstPage();
+
+      if (serviceRecord.length === 0) {
+        return { success: false, error: 'Service not found' };
+      }
+
+      const serviceDetails = serviceRecord[0];
+      const duration = serviceDetails.get('duration');
+      const price = serviceDetails.get('price');
+
+      // Create event in Google Calendar
+      const eventStartTime = new Date(dateTime);
+      const eventEndTime = new Date(eventStartTime.getTime() + duration * 60000);
+
+      const calendarEvent = await this.calendar.events.insert({
+        calendarId: process.env.GOOGLE_CALENDAR_ID,
+        requestBody: {
+          summary: `${service} - ${friendBooking ? friendName : customerName}`,
+          description: `Service: ${service}\nCustomer: ${customerName}\nPhone: ${customerPhone}${
+            friendBooking ? `\nFor: ${friendName} (${friendPhone})` : ''
+          }\nPrice: $${price}`,
+          start: {
+            dateTime: eventStartTime.toISOString(),
+            timeZone: 'Africa/Johannesburg'
+          },
+          end: {
+            dateTime: eventEndTime.toISOString(),
+            timeZone: 'Africa/Johannesburg'
+          },
+          reminders: {
+            useDefault: false,
+            overrides: [
+              { method: 'sms', minutes: 1440 }, // 24 hours before
+              { method: 'popup', minutes: 60 }
+            ]
+          }
+        }
+      });
+
+      // Create booking record in Airtable
+      const booking = await this.base('Bookings').create({
+        customer_id: customer.id,
+        customer_name: friendBooking ? friendName : customerName,
+        customer_phone: friendBooking ? friendPhone : customerPhone,
+        booked_by: friendBooking ? customerName : null,
+        booked_by_phone: friendBooking ? customerPhone : null,
+        service: service,
+        service_id: serviceDetails.id,
+        date_time: dateTime,
+        duration: duration,
+        price: price,
+        status: 'confirmed',
+        google_event_id: calendarEvent.data.id,
+        created_at: new Date().toISOString()
+      });
+
+      // Update customer booking count
+      await this.base('Customers').update(customer.id, {
+        total_bookings: bookingCount + 1,
+        last_booking_date: dateTime
+      });
+
+      return {
+        success: true,
+        bookingId: booking.id,
+        confirmationMessage: `✅ Booking confirmed!\n\n📅 ${service}\n🕐 ${eventStartTime.toLocaleString('en-US', {
+          weekday: 'long',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit'
+        })}\n💰 $${price}\n${friendBooking ? `👤 For: ${friendName}` : ''}\n\nYou'll receive a reminder 24 hours before your appointment.`
+      };
+    } catch (error) {
+      console.error('Error creating booking:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async getOrCreateCustomer(phone, name) {
+    const existing = await this.base('Customers')
+      .select({
+        filterByFormula: `{phone_number} = '${phone}'`,
+        maxRecords: 1
+      })
+      .firstPage();
+
+    if (existing.length > 0) {
+      return existing[0];
+    }
+
+    return await this.base('Customers').create({
+      name: name,
+      phone_number: phone,
+      total_bookings: 0,
+      created_at: new Date().toISOString()
+    });
+  }
+
+  async getBookingLimit() {
+    const settings = await this.base('BusinessSettings').select({ maxRecords: 1 }).firstPage();
+    return settings[0].get('booking_limit') || 6;
+  }
+
+  async getCustomerBookings({ phoneNumber, upcomingOnly = true }) {
+    try {
+      let formula = `{customer_phone} = '${phoneNumber}'`;
+      
+      if (upcomingOnly) {
+        const now = new Date().toISOString();
+        formula = `AND(${formula}, {date_time} >= '${now}', {status} != 'cancelled')`;
+      }
+
+      const bookings = await this.base('Bookings')
+        .select({
+          filterByFormula: formula,
+          sort: [{ field: 'date_time', direction: 'asc' }]
+        })
+        .all();
+
+      return {
+        success: true,
+        count: bookings.length,
+        bookings: bookings.map(b => ({
+          id: b.id,
+          service: b.get('service'),
+          dateTime: b.get('date_time'),
+          price: b.get('price'),
+          status: b.get('status')
+        }))
+      };
+    } catch (error) {
+      console.error('Error getting bookings:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async cancelBooking({ bookingId, reason }) {
+    try {
+      const booking = await this.base('Bookings').find(bookingId);
+      const googleEventId = booking.get('google_event_id');
+
+      // Cancel in Google Calendar
+      if (googleEventId) {
+        await this.calendar.events.delete({
+          calendarId: process.env.GOOGLE_CALENDAR_ID,
+          eventId: googleEventId
+        });
+      }
+
+      // Update booking status in Airtable
+      await this.base('Bookings').update(bookingId, {
+        status: 'cancelled',
+        cancellation_reason: reason || 'Customer request',
+        cancelled_at: new Date().toISOString()
+      });
+
+      // Update customer booking count
+      const customerId = booking.get('customer_id');
+      const customer = await this.base('Customers').find(customerId);
+      const currentCount = customer.get('total_bookings') || 0;
+      
+      await this.base('Customers').update(customerId, {
+        total_bookings: Math.max(0, currentCount - 1)
+      });
+
+      return {
+        success: true,
+        message: 'Appointment cancelled successfully'
+      };
+    } catch (error) {
+      console.error('Error cancelling booking:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async matchService({ userRequest }) {
+    // Use GPT-4o-nano for cost-optimized service matching
+    const { OpenAI } = require('openai');
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    try {
+      // Get all services
+      const services = await this.base('Services')
+        .select({ filterByFormula: '{archived} = FALSE()' })
+        .all();
+
+      const serviceList = services.map(s => s.get('name')).join(', ');
+
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-nano',
+        messages: [
+          {
+            role: 'system',
+            content: `You are a service name matcher. Match the user's request to one of these services: ${serviceList}. Return ONLY the exact service name, nothing else.`
+          },
+          {
+            role: 'user',
+            content: userRequest
+          }
+        ],
+        temperature: 0.3
+      });
+
+      const matchedService = completion.choices[0].message.content.trim();
+
+      return {
+        success: true,
+        matchedService,
+        confidence: 'high'
+      };
+    } catch (error) {
+      console.error('Error matching service:', error);
+      return { success: false, error: error.message };
+    }
+  }
+}
+
+// Start the MCP server
+const server = new SalonBookingMCP();
+server.start(process.env.MCP_PORT || 3000);
+
+console.log('🚀 Salon Booking MCP Server running on port', process.env.MCP_PORT || 3000);
+
+module.exports = SalonBookingMCP;

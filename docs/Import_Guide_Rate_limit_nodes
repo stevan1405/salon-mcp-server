@@ -1,0 +1,269 @@
+# How to Import Rate Limiting & Switch Nodes into Your Workflow
+
+## 📥 Step-by-Step Import Instructions
+
+### Step 1: Download the JSON File
+
+Download: `n8n-rate-limit-nodes-import.json`
+
+---
+
+### Step 2: Import into n8n
+
+1. Open your n8n workflow
+2. Click the **"..." menu** (top right, next to Execute Workflow)
+3. Select **"Import from File"**
+4. Choose the downloaded `n8n-rate-limit-nodes-import.json` file
+5. Click **"Import"**
+
+**Result:** You'll see 5 new nodes appear in a separate workflow tab:
+- Check & Increment Rate Limit (Code)
+- Increment Burst Counter (Redis)
+- Increment Hourly Counter (Redis)
+- Rate Limit OK? (IF)
+- Text or Media? (Switch)
+
+---
+
+### Step 3: Copy Nodes to Your Main Workflow
+
+**In the new imported workflow:**
+1. Select all 5 nodes (Ctrl+A or Cmd+A)
+2. Copy them (Ctrl+C or Cmd+C)
+
+**In your main WhatsApp workflow:**
+1. Click on the main workflow tab
+2. Paste the nodes (Ctrl+V or Cmd+V)
+3. Position them where you need them
+
+---
+
+### Step 4: Delete Old Nodes from Your Workflow
+
+**Remove these old nodes:**
+- ❌ Old "Check Rate Limit" (Redis GET)
+- ❌ Old "Increment Rate Counter" (Redis INCREMENT)
+- ❌ Old "Text or Media?" (if broken)
+
+---
+
+### Step 5: Connect the New Nodes
+
+**Connections you need to make:**
+
+```
+Extract Message Data
+    ↓
+Check & Increment Rate Limit (NEW)
+    ↓ (splits to 2 outputs)
+    ├─> Increment Burst Counter (NEW)
+    │       ↓
+    └─> Increment Hourly Counter (NEW)
+            ↓
+        (Both feed into)
+            ↓
+    Rate Limit OK? (NEW)
+        ├─ TRUE (Output 1) → Text or Media? (NEW)
+        └─ FALSE (Output 2) → Rate Limit Response (your existing node)
+
+Text or Media? (NEW)
+    ├─ Output 0 (Text) → Get Conversation History
+    ├─ Output 1 (Audio) → Download Audio
+    ├─ Output 2 (Image) → Download Image
+    └─ Output 3 (Document) → Skip or handle
+```
+
+---
+
+### Step 6: Configure Redis Credentials
+
+**For both Redis nodes:**
+
+1. Click **"Increment Burst Counter"** node
+2. Under **"Credential to connect with"**
+3. Select your **"Railway Redis Production"** credential
+4. If you don't see it, create it:
+   - Click "Create New Credential"
+   - Name: `Railway Redis Production`
+   - Host: `redis.railway.internal`
+   - Port: `6379`
+   - Password: (from Railway)
+   - Database: `0`
+   - SSL: No
+   - Save
+
+5. Repeat for **"Increment Hourly Counter"** node
+
+---
+
+### Step 7: Test the Configuration
+
+**Test 1: Normal Message**
+- Send "Hello" from WhatsApp
+- Should process normally ✅
+
+**Test 2: Rate Limit**
+- Send 6 messages rapidly
+- 6th message should be blocked ❌
+- Should receive rate limit message
+
+**Test 3: Switch Node**
+- Send text: "Hi" → Goes to Output 0 ✅
+- Send audio: → Goes to Output 1 ✅
+- Send image: → Goes to Output 2 ✅
+
+---
+
+## 🔧 Troubleshooting
+
+### Issue: "Node 'Increment Burst Counter' not found"
+
+**Fix:** The IF node is looking for the wrong node name.
+
+**In "Rate Limit OK?" node:**
+1. Click to edit
+2. Conditions → First condition
+3. Left Value should be: `={{$node['Increment Burst Counter'].json.value}}`
+4. Right Value should be: `={{$node['Check & Increment Rate Limit'].json.burstLimit}}`
+
+### Issue: Redis credentials not working
+
+**Fix:**
+1. Go to Railway → Redis service
+2. Copy the connection URL
+3. Extract: Host, Port, Password
+4. Update credentials in n8n
+
+### Issue: Switch node "No output data"
+
+**Fix:** The messageType field might be missing.
+
+**Check "Extract Message Data" node outputs:**
+- Should have: `messageType: "text"` or `"audio"` etc.
+- If missing, the Switch won't match
+
+---
+
+## 📊 Visual Connection Guide
+
+```
+┌─────────────────────────────────┐
+│  Extract Message Data           │
+└──────────┬──────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────┐
+│  Check & Increment Rate Limit   │  (Code - Prepares data)
+└──────────┬──────────────────────┘
+           │ (splits)
+           ├────────────────────────┐
+           │                        │
+           ▼                        ▼
+┌──────────────────────┐  ┌──────────────────────┐
+│ Increment Burst      │  │ Increment Hourly     │  (Redis - Atomic +1)
+│ Counter              │  │ Counter              │
+└──────────┬───────────┘  └──────────┬───────────┘
+           │                         │
+           └────────┬────────────────┘
+                    │ (both feed in)
+                    ▼
+           ┌──────────────────────┐
+           │  Rate Limit OK?      │  (IF - Check limits)
+           └──────────┬───────────┘
+                      │
+          ┌───────────┴───────────┐
+          │ TRUE                  │ FALSE
+          ▼                       ▼
+┌──────────────────────┐  ┌──────────────────────┐
+│  Text or Media?      │  │ Rate Limit Response  │
+│  (Switch)            │  │                      │
+└──────────┬───────────┘  └──────────────────────┘
+           │
+     ┌─────┴─────┬─────────┬─────────┐
+     │           │         │         │
+  Output 0    Output 1  Output 2  Output 3
+  (Text)      (Audio)   (Image)   (Doc)
+     │           │         │         │
+     ▼           ▼         ▼         ▼
+  Continue   Download  Download     Skip
+             Audio     Image
+```
+
+---
+
+## ✅ Verification Checklist
+
+After import and connection:
+
+- [ ] All 5 nodes visible in workflow
+- [ ] Redis credentials configured on both Redis nodes
+- [ ] "Check & Increment Rate Limit" connected to "Extract Message Data"
+- [ ] "Check & Increment Rate Limit" splits to both Redis nodes
+- [ ] Both Redis nodes connect to "Rate Limit OK?"
+- [ ] "Rate Limit OK?" TRUE → "Text or Media?"
+- [ ] "Rate Limit OK?" FALSE → Rate Limit Response
+- [ ] "Text or Media?" Output 0 → Get Conversation History (or next node)
+- [ ] Workflow saved
+- [ ] Test message sent successfully
+
+---
+
+## 🎯 What These Nodes Do
+
+### 1. Check & Increment Rate Limit (Code)
+**Purpose:** Prepares rate limiting data
+**Output:** Keys for Redis, limits, and pass-through data
+
+### 2. Increment Burst Counter (Redis)
+**Purpose:** Atomic increment of 30-second counter
+**Output:** Current count (e.g., 1, 2, 3... up to 5)
+
+### 3. Increment Hourly Counter (Redis)
+**Purpose:** Atomic increment of 1-hour counter
+**Output:** Current count (e.g., 1, 2, 3... up to 100)
+
+### 4. Rate Limit OK? (IF)
+**Purpose:** Check if both limits are OK
+**Condition 1:** Burst count ≤ 5
+**Condition 2:** Hourly count ≤ 100
+**Output:** TRUE (continue) or FALSE (block)
+
+### 5. Text or Media? (Switch)
+**Purpose:** Route based on message type
+**Output 0:** Text messages
+**Output 1:** Audio messages
+**Output 2:** Image messages
+**Output 3:** Document messages
+
+---
+
+## 🚀 After Import Success
+
+Once working:
+1. Test with real WhatsApp messages
+2. Monitor Redis in Railway (check keys being created)
+3. Test rate limiting (send 6 messages fast)
+4. Continue to next section (AI agents)
+
+---
+
+## 💡 Pro Tips
+
+1. **Import into a new workflow first** to see how nodes should be configured
+2. **Take screenshots** of node configurations before modifying
+3. **Test one node at a time** by using "Execute Node" button
+4. **Check executions** in left sidebar to debug issues
+5. **Use "Test workflow"** to manually trigger with sample data
+
+---
+
+## 🆘 Still Having Issues?
+
+If you're still stuck after import:
+
+1. **Screenshot the error** you're seeing
+2. **Show me the node configuration** that's failing
+3. **Share the execution log** from n8n
+4. **Tell me which step failed** in the import process
+
+I'll help you debug! 🚀
