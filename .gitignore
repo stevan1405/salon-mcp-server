@@ -1,6 +1,5 @@
 node_modules/
 .env
-*.json
 service-account.json .docs
 google-service-account.json
 *.backup *.old
