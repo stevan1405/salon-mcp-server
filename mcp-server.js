@@ -23,41 +23,43 @@ const airtable = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY });
 const base = airtable.base(process.env.AIRTABLE_BASE_ID);
 
 function getGoogleAuth() {
-  // Use service account (production - never expires)
+  // Use service account JSON from environment variable (Railway/production)
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    try {
+      const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+      const auth = new google.auth.GoogleAuth({
+        credentials,
+        scopes: ['https://www.googleapis.com/auth/calendar']
+      });
+      console.log('✅ Using Google Service Account from environment variable');
+      return auth;
+    } catch(e) {
+      console.error('❌ Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON:', e.message);
+    }
+  }
+
+  // Fallback to file (local development)
   if (process.env.GOOGLE_SERVICE_ACCOUNT_FILE) {
     const path = require('path');
     const serviceAccountPath = path.resolve(__dirname, process.env.GOOGLE_SERVICE_ACCOUNT_FILE);
-    
     const auth = new google.auth.GoogleAuth({
       keyFile: serviceAccountPath,
       scopes: ['https://www.googleapis.com/auth/calendar']
     });
-    
-    console.log('✅ Using Google Service Account (never expires)');
+    console.log('✅ Using Google Service Account from file (local)');
     return auth;
   }
-  
+
   // Fallback to OAuth (development only)
   const auth = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     process.env.GOOGLE_REDIRECT_URI
   );
-  
   auth.setCredentials({
     refresh_token: process.env.GOOGLE_REFRESH_TOKEN
   });
-  
-  // Auto-refresh tokens and log for monitoring
-  auth.on('tokens', (tokens) => {
-    console.log('🔄 Google tokens refreshed automatically');
-    if (tokens.refresh_token) {
-      console.log('⚠️  New refresh token received. Update .env with:');
-      console.log(`   GOOGLE_REFRESH_TOKEN=${tokens.refresh_token}`);
-    }
-  });
-  
-  console.log('⚠️  Using OAuth (may expire - add GOOGLE_SERVICE_ACCOUNT_FILE to .env for production)');
+  console.log('⚠️  Using OAuth fallback');
   return auth;
 }
 
