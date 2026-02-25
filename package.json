@@ -28,7 +28,7 @@
     "googleapis": "^128.0.0",
     "moment-timezone": "^0.5.45",
     "openai": "^4.28.0",
-    "redis": "^4.6.13"
+    "redis": "^4.7.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"

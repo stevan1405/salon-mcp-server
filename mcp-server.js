@@ -500,6 +500,35 @@ app.use('/mcp', (req, res, next) => {
   next();
 });
 
+const redis = require('redis');
+
+const redisClient = redis.createClient({
+  url: process.env.REDIS_URL  // internal Railway URL
+});
+
+redisClient.connect().catch(console.error);
+
+// Save conversation history
+app.post('/redis/set', async (req, res) => {
+  try {
+    const { key, value, ttl } = req.body;
+    await redisClient.set(key, value, { EX: ttl || 86400 });
+    res.json({ result: 'OK' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get conversation history
+app.get('/redis/get/:key', async (req, res) => {
+  try {
+    const value = await redisClient.get(req.params.key);
+    res.json({ value });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Main Claude endpoint (called by Booking Agent node)
 app.post('/mcp/claude', async (req, res) => {
   try {
